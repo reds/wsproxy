@@ -1,0 +1,11 @@
+Proxy server for HTML5 Websockets.
+
+A simple C application that creates a proxy between a web browser websocket
+and a connection orented server like IRC or jabber.
+
+To build:
+   make
+
+To configure:
+   edit the source.
+
