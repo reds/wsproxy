@@ -117,7 +117,13 @@ void client_read_ws_handshake ( struct bufferevent* be, void* arg ) {
 
   host = strdup ( host );  origin = strdup ( origin ); char* uri = strdup ( strings[1] );
 
-  sprintf ( buf, 
+  // remove the handshake and headers from the input buffer
+  int hs_len = buf - endofheaders + 4;
+  bufferevent_read ( be, buf, hs_len );
+
+  // send handshake response
+  char outbuf[500];
+  sprintf ( outbuf, 
 	    "HTTP/1.1 101 Web Socket Protocol Handshake\r\n"
 	    "Upgrade: WebSocket\r\n"
 	    "Connection: Upgrade\r\n"
@@ -127,16 +133,12 @@ void client_read_ws_handshake ( struct bufferevent* be, void* arg ) {
   free ( host ); free ( origin ); free ( uri );
 
   // send websock handshake
-  bufferevent_write ( be, buf, strlen ( buf ) );
+  bufferevent_write ( be, outbuf, strlen ( outbuf ) );
   bufferevent_enable ( be, EV_WRITE );
 
   struct bufferevent* server = connect_to_server ( serverhost, serverport );
   be->cbarg = server;
   server->cbarg = be;
-
-  // remove the handshake and headers from the input buffer
-  int hs_len = buf - endofheaders + 4;
-  bufferevent_read ( be, buf, hs_len );
 
   // reconfig the read callback 
   be->readcb = client_read;
