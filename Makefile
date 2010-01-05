@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -O2 -g
-LDFLAGS = -levent
+CFLAGS = -I/usr/local/include -O2 -g
+LDFLAGS = -L/usr/local/lib -levent
 
 all: wsproxy
 

@@ -24,6 +24,17 @@ short serverport = 6000;
 
 unsigned char frame[2] = { 0, 255 };
 
+void be_error ( struct bufferevent* be, short what, void* arg ) {
+  // what: EVBUFFER_TIMEOUT, EVBUFFER_ERROR
+  struct bufferevent* other = (struct bufferevent*) arg;
+  close ( be->ev_read.ev_fd );
+  close ( be->ev_write.ev_fd );
+  bufferevent_free ( be );
+  close ( other->ev_read.ev_fd );
+  close ( other->ev_write.ev_fd );
+  bufferevent_free ( other );
+}
+
 // server has produced data, relay it to the websocket client
 static void server_read ( struct bufferevent* be, void* arg ) {
   struct bufferevent* client = (struct bufferevent*) arg;
@@ -64,14 +75,15 @@ static void client_read ( struct bufferevent* be, void* arg ) {
   }
 }
 
-struct bufferevent* connect_to_server ( char* host, int port );
+struct bufferevent* connect_to_server ( char* host, int port, void* arg );
 // handle the websocket handshake
 void client_read_ws_handshake ( struct bufferevent* be, void* arg ) {
   // Examine the input buffer without reading from it.
   // Wait untill we have the full handshake to begin processing.
   int len = EVBUFFER_LENGTH ( EVBUFFER_INPUT ( be ) );
   char* data = EVBUFFER_DATA (  EVBUFFER_INPUT ( be ) );
-  char* buf = malloc ( len + 1 );
+  char buf[1024];
+  if ( len > sizeof buf ) len = sizeof buf;
   memcpy ( buf, data, len );
   buf[len] = '\0';
 
@@ -91,6 +103,7 @@ void client_read_ws_handshake ( struct bufferevent* be, void* arg ) {
 
   origin += 8;
   *eoo = '\0';
+  // chop the buffer up at each space char
   char* strings[50];
   int n = 0;
   char* ptmp;
@@ -108,13 +121,11 @@ void client_read_ws_handshake ( struct bufferevent* be, void* arg ) {
     // error
   }
   
-  // clear input recvq
-  // rb_linebuf_donebuf ( &client->localClient->buf_recvq );
-  
   char* host = strings[5];
   int l = strlen ( host );
   host[l - 9] = '\0';
 
+  // grab the info we are interested in
   host = strdup ( host );  origin = strdup ( origin ); char* uri = strdup ( strings[1] );
 
   // remove the handshake and headers from the input buffer
@@ -122,47 +133,29 @@ void client_read_ws_handshake ( struct bufferevent* be, void* arg ) {
   bufferevent_read ( be, buf, hs_len );
 
   // send handshake response
-  char outbuf[500];
-  sprintf ( outbuf, 
-	    "HTTP/1.1 101 Web Socket Protocol Handshake\r\n"
-	    "Upgrade: WebSocket\r\n"
-	    "Connection: Upgrade\r\n"
-	    "WebSocket-Origin: %s\r\n"
-	    "WebSocket-Location: ws://%s%s\r\n\r\n",
-	    origin, host, uri );
+  snprintf ( buf, sizeof buf,
+	     "HTTP/1.1 101 Web Socket Protocol Handshake\r\n"
+	     "Upgrade: WebSocket\r\n"
+	     "Connection: Upgrade\r\n"
+	     "WebSocket-Origin: %s\r\n"
+	     "WebSocket-Location: ws://%s%s\r\n\r\n",
+	     origin, host, uri );
   free ( host ); free ( origin ); free ( uri );
-
+  
   // send websock handshake
-  bufferevent_write ( be, outbuf, strlen ( outbuf ) );
+  bufferevent_write ( be, buf, strlen ( buf ) );
   bufferevent_enable ( be, EV_WRITE );
-
-  struct bufferevent* server = connect_to_server ( serverhost, serverport );
-  be->cbarg = server;
-  server->cbarg = be;
-
+  
+  struct bufferevent* server = connect_to_server ( serverhost, serverport, be );
+  
   // reconfig the read callback 
-  be->readcb = client_read;
+  bufferevent_setcb ( be, client_read, NULL, be_error, server );
   client_read ( be, server );
 }
-
-void be_error ( struct bufferevent* be, short type, void* arg ) {
-  struct bufferevent* other = (struct bufferevent*) arg;
-  close ( be->ev_read.ev_fd );
-  close ( be->ev_write.ev_fd );
-  bufferevent_free ( be );
-  close ( other->ev_read.ev_fd );
-  close ( other->ev_write.ev_fd );
-  bufferevent_free ( other );
-}
-
-void be_write ( struct bufferevent* be, void* arg ) {
-  bufferevent_disable ( be, EV_WRITE );
-}
-
+  
 // the server has accepted a connection from the proxy
 void server_connected ( struct bufferevent* be, void* arg ) {
-  be->writecb = be_write;
-  be->readcb = server_read;
+  bufferevent_setcb ( be, server_read, NULL, be_error, arg );
   struct bufferevent* client = (struct bufferevent*) arg;
   char buf[1024 * 10];
   int n = bufferevent_read ( client, buf, sizeof buf );
@@ -172,7 +165,7 @@ void server_connected ( struct bufferevent* be, void* arg ) {
   }
 }
 
-struct bufferevent* connect_to_server ( char* host, int port ) {
+struct bufferevent* connect_to_server ( char* host, int port, void* arg ) {
   uint32_t ip;
   inet_pton ( AF_INET, host, &ip );
   
@@ -187,7 +180,7 @@ struct bufferevent* connect_to_server ( char* host, int port ) {
 					     NULL,
 					     server_connected,
 					     be_error,
-					     NULL );
+					     arg );  // the client bufferevent
   bufferevent_enable ( be, EV_READ|EV_WRITE );
   connect ( fd, (struct sockaddr*)&raddr, sizeof raddr );
   return be;
@@ -201,7 +194,7 @@ void listener_accept ( int fd, short type, void* arg ) {
   if ( sock != -1 ) {
     struct bufferevent* client = bufferevent_new ( sock,
 					      client_read_ws_handshake,
-					      be_write,
+					      NULL,
 					      be_error, NULL );
     bufferevent_enable ( client, EV_READ|EV_WRITE );
   }
@@ -209,6 +202,7 @@ void listener_accept ( int fd, short type, void* arg ) {
 
 main() {
   //  daemon ( 1, 0 );
+  printf ( "%s\n", event_get_version() );
   event_init();
 
   int sock = socket( AF_INET, SOCK_STREAM, 0 );
